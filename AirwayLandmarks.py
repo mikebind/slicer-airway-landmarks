@@ -43,14 +43,201 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     ScriptedLoadableModuleWidget.setup(self)
 
     # Create or get the parameter node to store user choices
-    self.parameterNode = self.getLogic().getParameterNode()
+    self.parameterNode = AirwayLandmarksLogic().getParameterNode()
     pn = self.parameterNode
 
-    # Switch to custom 6-view
-    SEEGRLogic().activate6View()
-
+    fhLandmarkStringsList = ['Left ear FH', 'Right ear FH', 'Left orbit FH']
+    FHLandmarksNodeName = 'FH_Landmarks'
+    tempLandmarkNodeName = 'TempLandmark'
+    landmarksNodeName = 'Airway_Landmarks'
+    landmarkStrings = ['Nasion','Basion','Anterior nasal spine'] # make whole big list her
+    try:
+      slicer.mrmlScene.RemoveNode(slicer.util.getNode(FHLandmarksNodeName))
+    except slicer.util.MRMLNodeNotFoundException:
+      print('No old FHLandmarks node to remove')
+      pass
+    self.FHLandmarksNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode',FHLandmarksNodeName)
+    try:
+      slicer.mrmlScene.RemoveNode(slicer.util.getNode(tempLandmarkNodeName))
+    except slicer.util.MRMLNodeNotFoundException:
+      print('No old tempLandmarks node to remove')
+      pass
+    self.tempLandmarkNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode',tempLandmarkNodeName)
+  
+   
     # Instantiate and connect widgets ...
+    
+    # FH point selection
+    # Idea is to have a table widget which will indicate and track the landmarks to connect
+    # Start with FH points, which should be in a separate table
 
+    # FH Points
+    reorientCollapsibleButton = ctk.ctkCollapsibleButton()
+    reorientCollapsibleButton.text = 'Reorientation'
+    self.layout.addWidget(reorientCollapsibleButton)
+    self.reorientFormLayout = qt.QFormLayout(reorientCollapsibleButton)
+
+    # Build the FH table 
+    self.fhTable = self.buildLandmarkTable(fhLandmarkStringsList)
+    self.reorientFormLayout.addRow(self.fhTable)
+    # add the reorient button
+    self.reorientButton = qt.QPushButton('Reorient')
+    self.reorientFormLayout.addRow(self.reorientButton)
+
+    # Main Landmark table
+
+
+    # Connect callbacks
+    self.fhTable.connect('cellClicked(int,int)',self.onFHCellClicked)
+    self.tempLandmarkNode.AddObserver(self.tempLandmarkNode.PointPositionDefinedEvent, self.onLandmarkClick)
+    self.reorientButton.connect('clicked(bool)',self.onReorientButtonClick)
+    
+    '''
+    # Set the temporary node as the current Markups node
+    selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+    selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode") # set type of node
+    selectionNode.SetActivePlaceNodeID(self.tempLandmarkNode.GetID()) # set temp node as the active one for placement
+    # activate point placement mode (do we want to do this on setup here?, I think so)
+    interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+    interactionNode.SetCurrentInteractionMode(interactionNode.Place) # activate placement mode
+    # Set the first cell as active and call as if clicked on
+    self.fhTable.setCurrentItem(self.fhTable.item(0,0))
+    self.fhTable.setFocus() # not sure if this is needed
+    '''
+    # OR we could just
+    self.onFHCellClicked(0,0)
+    self.fhTable.setCurrentItem(self.fhTable.item(0,0))
+    self.fhTable.setFocus() # not sure if this is needed
+
+
+  def buildLandmarkTable(self,landmarkStringsList, include_sag_col=False):
+    table = qt.QTableWidget()
+    rowCount = len(landmarkStringsList)
+    table.setRowCount(rowCount)
+    if include_sag_col:
+      colHeaders = ['Landmark','Mid-Sag','R','A','S','Reset']
+    else:
+      colHeaders = ['Landmark','R','A','S','Reset']
+    colCount = len(colHeaders)
+    table.setColumnCount(colCount)
+    table.setHorizontalHeaderLabels(colHeaders)
+    for row in range(rowCount):
+      for col in range(colCount):
+        cell = qt.QTableWidgetItem()
+        table.setItem(row,col,cell)
+        if col==0:
+          cell.setText(landmarkStringsList[row])
+          cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled) # enabled and selectable, but not editable (41 would allow drop onto)
+        elif col==colCount-1:
+          # Last column is reset column
+          cell.setText('[X]')
+          cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)
+        elif col==colCount-2:
+          cell.setText('?')
+          cell.setCheckState(qt.Qt.Checked)
+          cell.setFlags(qt.Qt.ItemIsUserCheckable + qt.Qt.ItemIsEnabled)# trying this out
+        else:
+          # Other columns (RAS & sag col)
+          cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)#qt.Qt.NoItemFlags) 
+    return table
+  
+  def onFHCellClicked(self,row,col):
+    # User clicked on one of the FH table cells.  First column has landmark name, last column is to reset, 
+    # other columns should probably just reroute to first column.  
+    # Clicking on a row should: 
+    #   1. change temp node default name to current row landmark name
+    #   2. activate point placement
+    #   3. if reset cell clicked, remove existing coordinates from real landmark node
+
+    # Get current row landmark name
+    landmarkName = self.fhTable.item(row,0).text()
+    self.tempLandmarkNode.SetMarkupLabelFormat(landmarkName)
+
+    # Activate point placement mode and make the temp landmark node the current one
+    selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+    selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode") # set type of node
+    selectionNode.SetActivePlaceNodeID(self.tempLandmarkNode.GetID()) # set temp node as the active one for placement
+    interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+    interactionNode.SetCurrentInteractionMode(interactionNode.Place) # activate placement mode
+    interactionNode.SwitchToPersistentPlaceMode() # make it persistent
+
+    # If reset clicked, do the reset
+    if col==(self.fhTable.columnCount-1):
+      # Remove existing coordinates from real landmark node
+      for cpIdx in range(self.FHLandmarksNode.GetNumberOfControlPoints()):
+        label = self.FHLandmarksNode.GetNthControlPointLabel(cpIdx)
+        if label==landmarkName:
+          print('trying to remove control point %i'%(cpIdx))
+    # Activate point placement  
+
+    print('Table Cell clicked: row=%i, col=%i, text=%s'%(row,col,self.fhTable.item(row,col).text()))
+
+  def onLandmarkClick(self,caller,event):
+    # event is NoEvent
+    # Caller is the temp landmark node, I believe
+    # Clicking point placement on a view should:
+    #  1. transfer the clicked point location to the real landmarks node
+    #  2. update the table with RAS location (how do I know if it is FH table or other table?)
+    #  2. delete it from the temporary one
+    #  3. select the next unfilled landmark location on the table 
+    #  4. rename temp landmark node default name to be this next landmark (or deselect point placement mode and make default name 'You're finished!')
+    tempNode = caller # same as self.tempLandmarkNode
+    # Get the temp control point position
+    pos = [0]*3
+    tempNode.GetNthControlPointPositionWorld(0,pos)
+    realNode = self.FHLandmarksNode
+    # Get the landmark name
+    landmarkName = tempNode.GetNthControlPointLabel(0)
+    print('Landmark name: '+landmarkName)
+    # Check if the real landmark node already has a control point with this name
+    replaceCpIdx = None
+    for cpIdx in range(realNode.GetNumberOfControlPoints()):
+      cpLabel = realNode.GetNthControlPointLabel(cpIdx)
+      if cpLabel==landmarkName:
+        replaceCpIdx = cpIdx # replace this one
+    if replaceCpIdx is not None:
+      realNode.SetNthControlPointPositionWorld(replaceCpIdx, *pos)
+      cpIdx = replaceCpIdx
+    else:
+      # add as new control point
+      cpIdx = realNode.AddControlPointWorld( vtk.vtkVector3d(*pos) )
+      realNode.SetNthControlPointLabel(cpIdx, landmarkName)
+    # Update the landmark table with the position
+    success = AirwayLandmarksLogic().updateLandmarkTable(self.fhTable, landmarkName, pos)
+    if not success:
+      # Try the other landmark table
+      print('FH table updating failed')
+      pass
+    # Clear out temp control point
+    tempNode.RemoveAllControlPoints()
+    # Select the next unmarked row
+    AirwayLandmarksLogic().selectNextUnfilledRow(self.fhTable)
+    
+
+    #print('Landmark Name Later: '+landmarkName)
+    #print(caller)
+    #print(event)
+    
+
+
+  '''
+  OK, what do I need to set up?  
+  * Temporary Fidicual Node
+  * Real Fiducial Node
+  * Clicking on a row should:
+    * If that point is not yet defined, change the temporary node default name to that name, and activate point placement
+    * If that point is already defined?  Not sure yet.  Auto-replace?  That would be why we need a temporary name.  If Mid-Sag point, jump to mid sag plane!
+  * Clicking on reset for a row should remove existing coordinates, activate point placement
+  * Clicking point placement on a view should:
+    * transfer that clicked point location to the real fiducial node, delete it from the temp one, select the next unfilled landmark location on the table, rename temp default name to new row
+    * if there are no more empty landmark locations, unselect table cell (not sure how), and unselect placement node
+  * 
+  '''
+
+  '''HUGE HIDDEN COMMENTED SECTION OF CODE
+
+    # NEW CODE ABOVE HERE
+    #  def setup(self)    
     #
     # Input Fiducial selection
     #
@@ -67,22 +254,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
 
 
-    """ self.fiducialSelector = slicer.qMRMLNodeComboBox()
-    self.fiducialSelector.nodeTypes = ['vtkMRMLMarkupsFiducialNode']
-    self.fiducialSelector.selectNodeUponCreation = False
-    self.fiducialSelector.noneEnabled = True
-    self.fiducialSelector.setMRMLScene(slicer.mrmlScene)
-    self.inputFormLayout.addRow("Contact list: ",self.fiducialSelector) """
-    
-    # # Tied to volume:
-    # # The image volume the coordinates in the fiducial selector are tied to
-    # # (i.e. if a transform is applied to this volume, then the fiducial points should move!)
-    # self.coordVolumeSelector = slicer.qMRMLNodeComboBox()
-    # self.coordVolumeSelector.nodeTypes = ['vtkMRMLScalarVolumeNode'] # could also choose a transform??
-    # self.coordVolumeSelector.noneEnabled = True
-    # self.coordVolumeSelector.setMRMLScene(slicer.mrmlScene) #Ah, I think this tells it what scene it should look in to make it's list of scalar volume nodes
-    # self.coordVolumeSelector.selectNodeUponCreation = False
-    # self.inputFormLayout.addRow('Coord Relative To: ', self.coordVolumeSelector)
+
 
     self.buildTableButton = qt.QPushButton('Build Table')
     self.inputFormLayout.addRow(self.buildTableButton)
@@ -202,234 +374,348 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     self.updateGuiFromParameterNode() # if there is stuff in the parameter node, use it to reset selections
     self.updateParameterNodeFromGui() # if there wasn't stuff in the parameter node, fill it in
 
-  def cleanup(self):
-    pass
+    def cleanup(self):
+      pass
 
-  def updateGuiFromParameterNode(self):
-    # Use all settings in the parameter node to update the GUI display
-    # If a setting is not present (i.e. empty string), then don't force any change
-    parametersList = ['ElectrodeFolderSelectedItemText','TableBuiltFlag','baseImageSelectedId']
-    pass
+    def updateGuiFromParameterNode(self):
+      # Use all settings in the parameter node to update the GUI display
+      # If a setting is not present (i.e. empty string), then don't force any change
+      parametersList = ['ElectrodeFolderSelectedItemText','TableBuiltFlag','baseImageSelectedId']
+      pass
 
-  def updateParameterNodeFromGui(self):
-    # Anything the user has selected using the GUI should be placed into the 
-    # parameter node so that it can be saved and restored.
-    # Electrode Folder
-    electrodeFolderSelectedItemText = self.electrodeFolderSelector.currentText
-    self.parameterNode.SetParameter('ElectrodeFolderSelectedItemText',electrodeFolderSelectedItemText)
-    # Flag for whether table is built
-    # Table dimensions/info or rebuild table on load? (omit for now and rebuild on load, TODO?)
-    # Current selected row and column  (could just handle this in the contact selection code...)
-    # Base image selector
+    def updateParameterNodeFromGui(self):
+      # Anything the user has selected using the GUI should be placed into the 
+      # parameter node so that it can be saved and restored.
+      # Electrode Folder
+      electrodeFolderSelectedItemText = self.electrodeFolderSelector.currentText
+      self.parameterNode.SetParameter('ElectrodeFolderSelectedItemText',electrodeFolderSelectedItemText)
+      # Flag for whether table is built
+      # Table dimensions/info or rebuild table on load? (omit for now and rebuild on load, TODO?)
+      # Current selected row and column  (could just handle this in the contact selection code...)
+      # Base image selector
 
-    # Overlay image selector
-    # Overlay image opacity
-    # Parcellation selector
-    # Parcellation opacity slider value
-    
+      # Overlay image selector
+      # Overlay image opacity
+      # Parcellation selector
+      # Parcellation opacity slider value
+      
 
 
 
-  def onBaseImageSelect(self,volNode):
-    if volNode is None:
-      volID = None
-    else:
-      volID = volNode.GetID()
-    SEEGRLogic().setAllSlicesBaseImage(volID)
-    
-  def onOverlayImageSelect(self,volNode):
-    if volNode is None:
-      volID = None
-    else:
-      volID = volNode.GetID()
-    SEEGRLogic().setAllSlicesOverlayImage(volID)
-  def onParcellationImageSelect(self,volNode):
-    if volNode is None:
-      volID = None
-    else:
-      volID = volNode.GetID()
-    SEEGRLogic().setAllSlicesLabelImage(volID)
+    def onBaseImageSelect(self,volNode):
+      if volNode is None:
+        volID = None
+      else:
+        volID = volNode.GetID()
+      SEEGRLogic().setAllSlicesBaseImage(volID)
+      
+    def onOverlayImageSelect(self,volNode):
+      if volNode is None:
+        volID = None
+      else:
+        volID = volNode.GetID()
+      SEEGRLogic().setAllSlicesOverlayImage(volID)
+    def onParcellationImageSelect(self,volNode):
+      if volNode is None:
+        volID = None
+      else:
+        volID = volNode.GetID()
+      SEEGRLogic().setAllSlicesLabelImage(volID)
 
-  def overlayOpacitySliderChanged(self,opacityVal):
-    # Change the overlay (foreground) image opacity
-    logic = SEEGRLogic()
-    logic.setAllSlicesOverlayOpacity(opacityVal)
-    
-  def parcellationOpacitySliderChanged(self,opacityVal):
-    logic = SEEGRLogic()
-    logic.setAllSlicesParcellationOpacity(opacityVal)
+    def overlayOpacitySliderChanged(self,opacityVal):
+      # Change the overlay (foreground) image opacity
+      logic = SEEGRLogic()
+      logic.setAllSlicesOverlayOpacity(opacityVal)
+      
+    def parcellationOpacitySliderChanged(self,opacityVal):
+      logic = SEEGRLogic()
+      logic.setAllSlicesParcellationOpacity(opacityVal)
 
-  def onSaveToFileButtonClick(self):
-    fileDlg = ctk.ctkFileDialog()
-    fileDlgParent = None
-    caption = "Save Data As..."
-    if hasattr(self,'savedFileName'):
-      startingDir = self.savedFileName
-    else:
-      startingDir = 'SEEGR.gridDict.json'
-    fileFilter = 'JSON file (*.json)'
-    savedFileName = fileDlg.getSaveFileName(fileDlgParent,caption,startingDir,fileFilter) # launches file open dialog 
-    if savedFileName=='':
-      return # canceled without choosing file
-    else: 
-      self.savedFileName = savedFileName 
-      with open(self.savedFileName,'w') as f:
-        json.dump(self.gridDict,f)
+    def onSaveToFileButtonClick(self):
+      fileDlg = ctk.ctkFileDialog()
+      fileDlgParent = None
+      caption = "Save Data As..."
+      if hasattr(self,'savedFileName'):
+        startingDir = self.savedFileName
+      else:
+        startingDir = 'SEEGR.gridDict.json'
+      fileFilter = 'JSON file (*.json)'
+      savedFileName = fileDlg.getSaveFileName(fileDlgParent,caption,startingDir,fileFilter) # launches file open dialog 
+      if savedFileName=='':
+        return # canceled without choosing file
+      else: 
+        self.savedFileName = savedFileName 
+        with open(self.savedFileName,'w') as f:
+          json.dump(self.gridDict,f)
 
-  def onLoadFromFileButtonClick(self):
-    fileDlg = ctk.ctkFileDialog()
-    fileDlgParent = None
-    caption = "Load Data From..."
-    if hasattr(self,'savedFileName'):
-      startingDir = self.savedFileName
-    else:
-      startingDir = 'SEEGR.gridDict.json'
-    fileFilter = 'JSON file (*.json)'
-    savedFileName = fileDlg.getOpenFileName(fileDlgParent,caption,startingDir,fileFilter) # launches file open dialog 
-    if savedFileName=='':
-      return # canceled without choosing file
-    else: 
-      self.savedFileName = savedFileName 
-      with open(self.savedFileName,'r') as f:
-        if hasattr(self,'gridDict'):
-          self.oldGridDictBeforeLoad = self.gridDict
-        self.gridDict = json.load(f)
-    # Build table from loaded data
-    self.buildTableFromGridDict()
-    # TODO: note that the table could now be out of sync with the curve nodes, this needs to be checked up on...
-    
-  def buildTableFromGridDict(self):
-    if hasattr(self,'table'):
-      # table already exists, it should be cleared out before updating
+    def onLoadFromFileButtonClick(self):
+      fileDlg = ctk.ctkFileDialog()
+      fileDlgParent = None
+      caption = "Load Data From..."
+      if hasattr(self,'savedFileName'):
+        startingDir = self.savedFileName
+      else:
+        startingDir = 'SEEGR.gridDict.json'
+      fileFilter = 'JSON file (*.json)'
+      savedFileName = fileDlg.getOpenFileName(fileDlgParent,caption,startingDir,fileFilter) # launches file open dialog 
+      if savedFileName=='':
+        return # canceled without choosing file
+      else: 
+        self.savedFileName = savedFileName 
+        with open(self.savedFileName,'r') as f:
+          if hasattr(self,'gridDict'):
+            self.oldGridDictBeforeLoad = self.gridDict
+          self.gridDict = json.load(f)
+      # Build table from loaded data
+      self.buildTableFromGridDict()
+      # TODO: note that the table could now be out of sync with the curve nodes, this needs to be checked up on...
+      
+    def buildTableFromGridDict(self):
+      if hasattr(self,'table'):
+        # table already exists, it should be cleared out before updating
+        while self.tableFormLayout.rowCount()>0:
+          self.tableFormLayout.takeAt(0)
+
+      # Create table from gridDict
+      self.table = self.makeQTableWidget(self.gridDict)
+
+      # Add it to the layout
+      self.tableFormLayout.addRow(self.table)
+      # Resize
+      self.fitTableSize(self.table)
+
+    def onBuildTableButtonClick(self):
+      # Build/Rebuild table, based on current selection of electrode folder
+      shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+      sceneID = shNode.GetSceneItemID()
+      #invalidItemID = slicer.vtkMRMLSubjectHierarchyNode.GetInvalidItemID()
+
+      folder_name = self.electrodeFolderSelector.currentText
+      electrodeFolderSubjectHierarchyID = shNode.GetItemChildWithName(sceneID,folder_name)
+      childrenIDs = vtk.vtkIdList()
+      shNode.GetItemChildren(electrodeFolderSubjectHierarchyID,childrenIDs)
+      curve_node_list = [shNode.GetItemDataNode(childID) for childID in [childrenIDs.GetId(i) for i in range(childrenIDs.GetNumberOfIds())]]
+
+      logic = SEEGRLogic()
+      self.gridDict = logic.processCurveNodesToElectrodeDict(curve_node_list)
+
+      self.buildTableFromGridDict()
+
+
+    def fitTableSize(self,table):
+      # change the table size to have no scrollbars and be minimal size
+      # based on https://stackoverflow.com/questions/8766633/how-to-determine-the-correct-size-of-a-qtablewidget
+      growFlag = 1 #https://doc.qt.io/qt-5/qsizepolicy.html#PolicyFlag-enum
+      table.setSizePolicy(growFlag,growFlag)
+      table.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+      table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+      table.resizeColumnsToContents()
+      width = table.horizontalHeader().length()+table.verticalHeader().width
+      height = table.verticalHeader().length()+table.horizontalHeader().height
+      table.setFixedSize(width,height)
+
+    def makeQTableWidget(self,gridDict):
+      gridNames = sorted(gridDict.keys(),key=sortByForGridNames)# uses custom sorting function (could use different ones for table selector if desired)
+
+      numGrids = len(gridNames)
+      numContacts = []
+      # determin max # of contacts
+      for gridName in gridNames:
+        numContacts.append(len(gridDict[gridName].keys()))
+      maxNumContacts = np.max(numContacts)
+
+      table = qt.QTableWidget()
+      rowCount = numGrids
+      table.setRowCount(rowCount)
+      colCount = maxNumContacts+1 #+1 for name column
+      table.setColumnCount(colCount)
+
+      # make list of contact numbers for column headers
+      contacNumberStrs = [str(n) for n in range(maxNumContacts,0,-1)] # count down from max to 1 and convert to string
+      colHeaders = ['Name']
+      colHeaders.extend(contacNumberStrs)
+      table.setHorizontalHeaderLabels(colHeaders)
+      #table.setVerticalHeaderLabels(gridNames) # alternate approach, not currently used
+
+      outsideBrainNamedColor = 'azure'
+      outsideBrainBrush = makeQBrush(outsideBrainNamedColor,qt.Qt.SolidPattern)#DiagCrossPattern) 
+
+      # Loop over the table entries, initializing, setting flags and colors, tooltips, etc
+      for row in range(rowCount):
+        gridName = gridNames[row]
+        for col in range(colCount):
+
+          cell = qt.QTableWidgetItem()
+          table.setItem(row,col,cell) # fill in with table widget items
+          if col==0:
+            # Grid name column
+            cell.setText(gridName)
+            cell.setFlags(33) # enabled and selectable, but not editable (41 would allow drop onto)
+          else:
+            # Contact number column 
+            contactNumStr = colHeaders[col] # pull directly from column header list
+            cell.setFlags(33) # enabled and selectable, but not editable (41 would allow drop onto)
+            # Determine if there is a corresponding contact for this number for this grid
+            if contactNumStr in gridDict[gridName].keys():
+              # Connect callback HERE
+              #cell.connect('cellClicked(int,int)',lambda r,c: logic.cellSelected(table,r,c)) # lambda used to pass the table as additional argument
+              # Color should be based on Gray/White/Unknown balance (as summarized in GWULabel?)
+              if 'GWULabel' in gridDict[gridName][contactNumStr].keys():
+                GWULabel = gridDict[gridName][contactNumStr]['GWULabel']
+                brush = brushFromGWULabel(GWULabel)
+                cell.setBackground(brush)
+              else:
+                # No GWU label stored, should probably put something else here (so it doesn't look like white matter entry)
+                brush = makeQBrush('yellow',5) # half dense 
+                # Set tooltip to anatomy label if available!
+              if 'AnatLabelAll' in gridDict[gridName][contactNumStr].keys():
+                cell.setToolTip(gridDict[gridName][contactNumStr]['AnatLabelAll'])
+            else:
+              # no contact here, color based on outside brain color
+              cell.setBackground(outsideBrainBrush)
+      logic = SEEGRLogic()
+      table.connect('cellClicked(int,int)', self.onCellSelect) 
+      return table
+
+    def onCellSelect(self,row,col):
+      logic = SEEGRLogic()
+      # if self.coordVolumeSelector.currentNode() is not None:
+      #   linkedVolume = self.coordVolumeSelector.currentNode()
+      # else:
+      #  linkedVolume = None
+      linkedVolume = None
+      contactPos = logic.cellSelected(self.table,row,col,self.gridDict,linkedVolume)
+      
+      if contactPos is None:
+        return
+      # otherwise, keep going
+
+      # Also update selected fiducial
+      # Create or update selected fiducial node (the orange one which is separate from the main list)
+      if hasattr(self,'selectedContactFiducialNode'):
+        # update
+        self.selectedContactFiducialNode.SetNthFiducialPosition(0,contactPos[0],contactPos[1],contactPos[2])
+      else:
+        # Take over an existing one if it exists, create otherwise
+        fiducialNodesList = slicer.util.getNodesByClass('vtkMRMLMarkupsFiducialNode')
+        fiducialNodeNames = [fNode.GetName() for fNode in fiducialNodesList]
+        if 'SelectedContact' in fiducialNodeNames:
+          # Take it over
+          self.selectedContactFiducialNode = slicer.util.getNode('SelectedContact')
+        else:
+          # create
+          self.selectedContactFiducialNode = slicer.vtkMRMLMarkupsFiducialNode()
+          self.selectedContactFiducialNode.SetName('SelectedContact')
+          slicer.mrmlScene.AddNode(self.selectedContactFiducialNode)
+          self.selectedContactFiducialNode.CreateDefaultDisplayNodes()
+          self.selectedContactFiducialNode.AddFiducial(contactPos[0],contactPos[1],contactPos[2])
+          # Set color and visibility
+          displayNode = self.selectedContactFiducialNode.GetDisplayNode()
+          self.selectedContactFiducialNode.SetNthFiducialVisibility(0,True)
+          self.selectedContactFiducialNode.SetNthFiducialSelected(0,True)
+          displayNode.SetSelectedColor(1,.5,0) # orange
+
+      # Set visibility based on showSelectedContact flag
+      self.selectedContactFiducialNode.SetNthFiducialVisibility(0,self.showSelectedContact)
+      gridName = self.table.item(row,0).text()
+      contactNumberStr = self.table.horizontalHeaderItem(col).text()
+      displayName = gridName+'_'+contactNumberStr
+      self.selectedContactFiducialNode.SetNthFiducialLabel(0,displayName)
+
+      # Change properties of electrode with selected contact (show numbers and change selection)
+      shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+      sceneID = shNode.GetSceneItemID()
+      folder_name = self.electrodeFolderSelector.currentText
+      electrodeFolderSubjectHierarchyID = shNode.GetItemChildWithName(sceneID,folder_name)
+      childrenIDs = vtk.vtkIdList()
+      shNode.GetItemChildren(electrodeFolderSubjectHierarchyID,childrenIDs)
+      curve_node_list = [shNode.GetItemDataNode(childID) for childID in [childrenIDs.GetId(i) for i in range(childrenIDs.GetNumberOfIds())]]
+      for cn in curve_node_list:
+        if cn.GetName() == gridName:
+          # This is the selected one
+          cn.GetDisplayNode().SetPointLabelsVisibility(1) # Turn on point labels
+          selectedStateToDisplay = 0 # set each to unselected (this will change color)
+        else:
+          # Not selected one
+          cn.GetDisplayNode().SetPointLabelsVisibility(0) # turn off point labels
+          selectedStateToDisplay = 1 # set each to selected (this is the default)
+        for i in range(cn.GetNumberOfControlPoints()):
+          cn.SetNthControlPointSelected(i,selectedStateToDisplay)
+      
+      # Add Corner annotation of the Electrode name and Selected contact number
+      lm = slicer.app.layoutManager()
+      sliceViewNames = lm.sliceViewNames()
+      textToAdd = '%s - %s'%(gridName,contactNumberStr)
+      for sliceName in sliceViewNames:
+        view = lm.sliceWidget(sliceName).sliceView()
+        view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperRight,textToAdd)
+        view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperLeft,textToAdd)
+        textProperty = view.cornerAnnotation().GetTextProperty()
+        textProperty.SetColor(0,1,1)
+        view.forceRender()
+      # Same for 3D view
+      view=slicer.app.layoutManager().threeDWidget(0).threeDView()
+      view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperRight,textToAdd)
+      view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperLeft,textToAdd)
+      textProperty = view.cornerAnnotation().GetTextProperty()
+      textProperty.SetColor(0,1,1)
+      view.forceRender()
+
+      
+    def resetForm(self):
+      #while self.parametersFormLayout.rowCount()>0:
+      #  self.parametersFormLayout.takeAt(0)
       while self.tableFormLayout.rowCount()>0:
         self.tableFormLayout.takeAt(0)
 
-    # Create table from gridDict
-    self.table = self.makeQTableWidget(self.gridDict)
+    # def onGridSelect(self):
+    #   logic = SEEGRLogic()
+    #   gridName = self.gridSelector.currentText
+    #   if gridName=='--Select from below--':
+    #     # TODO this should actually strip out the entries in the contact list, otherwise the gridName will cause an error when a new contact is selected
+    #     return
+      
+    #   print "Selected grid named: "+gridName
 
-    # Add it to the layout
-    self.tableFormLayout.addRow(self.table)
-    # Resize
-    self.fitTableSize(self.table)
+    #   if gridName in self.gridDict:
+    #     # create contact selector
+    #     if hasattr(self,'contactSelector'):
+    #       self.contactSelector.disconnect('currentIndexChanged(int)') # disconnect so that removing items won't trigger callbacks
+    #       while self.contactSelector.count >0:
+    #         self.contactSelector.removeItem(0)
+    #     else:
+    #       # create if it doesn't exist
+    #       self.contactSelector = qt.QComboBox()
+    #       self.contactSelector.setMaxVisibleItems(20)
+    #       self.parametersFormLayout.addRow('Choose contact: ',self.contactSelector)
+        
+    #     contactStrings = self.gridDict[gridName].keys()
+    #     contactStrings.sort(key=int) # sort by integer cast
+    #     contactStrings.insert(0,'--Select from below--')
+    #     self.contactSelector.addItems(contactStrings) 
+    #     self.contactSelector.connect('currentIndexChanged(int)',self.onContactSelectorChoice)
 
-  def onBuildTableButtonClick(self):
-    # Build/Rebuild table, based on current selection of electrode folder
-    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
-    sceneID = shNode.GetSceneItemID()
-    #invalidItemID = slicer.vtkMRMLSubjectHierarchyNode.GetInvalidItemID()
+    def onContactSelectorChoice(self):
+      #print 'Selected contact #'+self.contactSelector.currentText+' from grid '+self.gridSelector.currentText
 
-    folder_name = self.electrodeFolderSelector.currentText
-    electrodeFolderSubjectHierarchyID = shNode.GetItemChildWithName(sceneID,folder_name)
-    childrenIDs = vtk.vtkIdList()
-    shNode.GetItemChildren(electrodeFolderSubjectHierarchyID,childrenIDs)
-    curve_node_list = [shNode.GetItemDataNode(childID) for childID in [childrenIDs.GetId(i) for i in range(childrenIDs.GetNumberOfIds())]]
+      gridName = self.gridSelector.currentText
+      contactNumberStr = self.contactSelector.currentText
+      if contactNumberStr=='--Select from below--':
+        return None
+      #parallelSliceNode = slicer.util.getNode('vtkMRMLSliceNodeParallel')
+      #orthoSliceNode = slicer.util.getNode('vtkMRMLSliceNodeOrthogonal')
 
-    logic = SEEGRLogic()
-    self.gridDict = logic.processCurveNodesToElectrodeDict(curve_node_list)
+      offsetOrCenter = 'center'
 
-    self.buildTableFromGridDict()
+      logic = SEEGRLogic()
 
+      logic.jumpParaAndOrthoSlicesToContact(gridName,contactNumberStr,self.gridDict,offsetOrCenter)
+      contactPos = self.gridDict[gridName][contactNumberStr]['Position']
 
-  def fitTableSize(self,table):
-    # change the table size to have no scrollbars and be minimal size
-    # based on https://stackoverflow.com/questions/8766633/how-to-determine-the-correct-size-of-a-qtablewidget
-    growFlag = 1 #https://doc.qt.io/qt-5/qsizepolicy.html#PolicyFlag-enum
-    table.setSizePolicy(growFlag,growFlag)
-    table.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-    table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-    table.resizeColumnsToContents()
-    width = table.horizontalHeader().length()+table.verticalHeader().width
-    height = table.verticalHeader().length()+table.horizontalHeader().height
-    table.setFixedSize(width,height)
-
-  def makeQTableWidget(self,gridDict):
-    gridNames = sorted(gridDict.keys(),key=sortByForGridNames)# uses custom sorting function (could use different ones for table selector if desired)
-
-    numGrids = len(gridNames)
-    numContacts = []
-    # determin max # of contacts
-    for gridName in gridNames:
-      numContacts.append(len(gridDict[gridName].keys()))
-    maxNumContacts = np.max(numContacts)
-
-    table = qt.QTableWidget()
-    rowCount = numGrids
-    table.setRowCount(rowCount)
-    colCount = maxNumContacts+1 #+1 for name column
-    table.setColumnCount(colCount)
-
-    # make list of contact numbers for column headers
-    contacNumberStrs = [str(n) for n in range(maxNumContacts,0,-1)] # count down from max to 1 and convert to string
-    colHeaders = ['Name']
-    colHeaders.extend(contacNumberStrs)
-    table.setHorizontalHeaderLabels(colHeaders)
-    #table.setVerticalHeaderLabels(gridNames) # alternate approach, not currently used
-
-    outsideBrainNamedColor = 'azure'
-    outsideBrainBrush = makeQBrush(outsideBrainNamedColor,qt.Qt.SolidPattern)#DiagCrossPattern) 
-
-    # Loop over the table entries, initializing, setting flags and colors, tooltips, etc
-    for row in range(rowCount):
-      gridName = gridNames[row]
-      for col in range(colCount):
-
-        cell = qt.QTableWidgetItem()
-        table.setItem(row,col,cell) # fill in with table widget items
-        if col==0:
-          # Grid name column
-          cell.setText(gridName)
-          cell.setFlags(33) # enabled and selectable, but not editable (41 would allow drop onto)
-        else:
-          # Contact number column 
-          contactNumStr = colHeaders[col] # pull directly from column header list
-          cell.setFlags(33) # enabled and selectable, but not editable (41 would allow drop onto)
-          # Determine if there is a corresponding contact for this number for this grid
-          if contactNumStr in gridDict[gridName].keys():
-            # Connect callback HERE
-            #cell.connect('cellClicked(int,int)',lambda r,c: logic.cellSelected(table,r,c)) # lambda used to pass the table as additional argument
-            # Color should be based on Gray/White/Unknown balance (as summarized in GWULabel?)
-            if 'GWULabel' in gridDict[gridName][contactNumStr].keys():
-              GWULabel = gridDict[gridName][contactNumStr]['GWULabel']
-              brush = brushFromGWULabel(GWULabel)
-              cell.setBackground(brush)
-            else:
-              # No GWU label stored, should probably put something else here (so it doesn't look like white matter entry)
-              brush = makeQBrush('yellow',5) # half dense 
-              # Set tooltip to anatomy label if available!
-            if 'AnatLabelAll' in gridDict[gridName][contactNumStr].keys():
-              cell.setToolTip(gridDict[gridName][contactNumStr]['AnatLabelAll'])
-          else:
-            # no contact here, color based on outside brain color
-            cell.setBackground(outsideBrainBrush)
-    logic = SEEGRLogic()
-    table.connect('cellClicked(int,int)', self.onCellSelect) 
-    return table
-
-  def onCellSelect(self,row,col):
-    logic = SEEGRLogic()
-    # if self.coordVolumeSelector.currentNode() is not None:
-    #   linkedVolume = self.coordVolumeSelector.currentNode()
-    # else:
-    #  linkedVolume = None
-    linkedVolume = None
-    contactPos = logic.cellSelected(self.table,row,col,self.gridDict,linkedVolume)
-    
-    if contactPos is None:
-      return
-    # otherwise, keep going
-
-    # Also update selected fiducial
-    # Create or update selected fiducial node (the orange one which is separate from the main list)
-    if hasattr(self,'selectedContactFiducialNode'):
-      # update
-      self.selectedContactFiducialNode.SetNthFiducialPosition(0,contactPos[0],contactPos[1],contactPos[2])
-    else:
-      # Take over an existing one if it exists, create otherwise
-      fiducialNodesList = slicer.util.getNodesByClass('vtkMRMLMarkupsFiducialNode')
-      fiducialNodeNames = [fNode.GetName() for fNode in fiducialNodesList]
-      if 'SelectedContact' in fiducialNodeNames:
-        # Take it over
-        self.selectedContactFiducialNode = slicer.util.getNode('SelectedContact')
+      # Create or update selected fiducial node (the orange one which is separate from the main list)
+      if hasattr(self,'selectedContactFiducialNode'):
+        # update
+        self.selectedContactFiducialNode.SetNthFiducialPosition(0,contactPos[0],contactPos[1],contactPos[2])
       else:
         # create
         self.selectedContactFiducialNode = slicer.vtkMRMLMarkupsFiducialNode()
@@ -443,128 +729,14 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
         self.selectedContactFiducialNode.SetNthFiducialSelected(0,True)
         displayNode.SetSelectedColor(1,.5,0) # orange
 
-    # Set visibility based on showSelectedContact flag
-    self.selectedContactFiducialNode.SetNthFiducialVisibility(0,self.showSelectedContact)
-    gridName = self.table.item(row,0).text()
-    contactNumberStr = self.table.horizontalHeaderItem(col).text()
-    displayName = gridName+'_'+contactNumberStr
-    self.selectedContactFiducialNode.SetNthFiducialLabel(0,displayName)
+      # Set visibility based on showSelectedContact flag
+      self.selectedContactFiducialNode.SetNthFiducialVisibility(0,self.showSelectedContact)
+      displayName = gridName+'_'+contactNumberStr
+      self.selectedContactFiducialNode.SetNthFiducialLabel(0,displayName)
 
-    # Change properties of electrode with selected contact (show numbers and change selection)
-    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
-    sceneID = shNode.GetSceneItemID()
-    folder_name = self.electrodeFolderSelector.currentText
-    electrodeFolderSubjectHierarchyID = shNode.GetItemChildWithName(sceneID,folder_name)
-    childrenIDs = vtk.vtkIdList()
-    shNode.GetItemChildren(electrodeFolderSubjectHierarchyID,childrenIDs)
-    curve_node_list = [shNode.GetItemDataNode(childID) for childID in [childrenIDs.GetId(i) for i in range(childrenIDs.GetNumberOfIds())]]
-    for cn in curve_node_list:
-      if cn.GetName() == gridName:
-        # This is the selected one
-        cn.GetDisplayNode().SetPointLabelsVisibility(1) # Turn on point labels
-        selectedStateToDisplay = 0 # set each to unselected (this will change color)
-      else:
-        # Not selected one
-        cn.GetDisplayNode().SetPointLabelsVisibility(0) # turn off point labels
-        selectedStateToDisplay = 1 # set each to selected (this is the default)
-      for i in range(cn.GetNumberOfControlPoints()):
-        cn.SetNthControlPointSelected(i,selectedStateToDisplay)
-    
-    # Add Corner annotation of the Electrode name and Selected contact number
-    lm = slicer.app.layoutManager()
-    sliceViewNames = lm.sliceViewNames()
-    textToAdd = '%s - %s'%(gridName,contactNumberStr)
-    for sliceName in sliceViewNames:
-      view = lm.sliceWidget(sliceName).sliceView()
-      view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperRight,textToAdd)
-      view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperLeft,textToAdd)
-      textProperty = view.cornerAnnotation().GetTextProperty()
-      textProperty.SetColor(0,1,1)
-      view.forceRender()
-    # Same for 3D view
-    view=slicer.app.layoutManager().threeDWidget(0).threeDView()
-    view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperRight,textToAdd)
-    view.cornerAnnotation().SetText(vtk.vtkCornerAnnotation.UpperLeft,textToAdd)
-    textProperty = view.cornerAnnotation().GetTextProperty()
-    textProperty.SetColor(0,1,1)
-    view.forceRender()
-
-    
-  def resetForm(self):
-    #while self.parametersFormLayout.rowCount()>0:
-    #  self.parametersFormLayout.takeAt(0)
-    while self.tableFormLayout.rowCount()>0:
-      self.tableFormLayout.takeAt(0)
-
-  # def onGridSelect(self):
-  #   logic = SEEGRLogic()
-  #   gridName = self.gridSelector.currentText
-  #   if gridName=='--Select from below--':
-  #     # TODO this should actually strip out the entries in the contact list, otherwise the gridName will cause an error when a new contact is selected
-  #     return
-    
-  #   print "Selected grid named: "+gridName
-
-  #   if gridName in self.gridDict:
-  #     # create contact selector
-  #     if hasattr(self,'contactSelector'):
-  #       self.contactSelector.disconnect('currentIndexChanged(int)') # disconnect so that removing items won't trigger callbacks
-  #       while self.contactSelector.count >0:
-  #         self.contactSelector.removeItem(0)
-  #     else:
-  #       # create if it doesn't exist
-  #       self.contactSelector = qt.QComboBox()
-  #       self.contactSelector.setMaxVisibleItems(20)
-  #       self.parametersFormLayout.addRow('Choose contact: ',self.contactSelector)
-      
-  #     contactStrings = self.gridDict[gridName].keys()
-  #     contactStrings.sort(key=int) # sort by integer cast
-  #     contactStrings.insert(0,'--Select from below--')
-  #     self.contactSelector.addItems(contactStrings) 
-  #     self.contactSelector.connect('currentIndexChanged(int)',self.onContactSelectorChoice)
-
-  def onContactSelectorChoice(self):
-    #print 'Selected contact #'+self.contactSelector.currentText+' from grid '+self.gridSelector.currentText
-
-    gridName = self.gridSelector.currentText
-    contactNumberStr = self.contactSelector.currentText
-    if contactNumberStr=='--Select from below--':
-      return None
-    #parallelSliceNode = slicer.util.getNode('vtkMRMLSliceNodeParallel')
-    #orthoSliceNode = slicer.util.getNode('vtkMRMLSliceNodeOrthogonal')
-
-    offsetOrCenter = 'center'
-
-    logic = SEEGRLogic()
-
-    logic.jumpParaAndOrthoSlicesToContact(gridName,contactNumberStr,self.gridDict,offsetOrCenter)
-    contactPos = self.gridDict[gridName][contactNumberStr]['Position']
-
-    # Create or update selected fiducial node (the orange one which is separate from the main list)
-    if hasattr(self,'selectedContactFiducialNode'):
-      # update
-      self.selectedContactFiducialNode.SetNthFiducialPosition(0,contactPos[0],contactPos[1],contactPos[2])
-    else:
-      # create
-      self.selectedContactFiducialNode = slicer.vtkMRMLMarkupsFiducialNode()
-      self.selectedContactFiducialNode.SetName('SelectedContact')
-      slicer.mrmlScene.AddNode(self.selectedContactFiducialNode)
-      self.selectedContactFiducialNode.CreateDefaultDisplayNodes()
-      self.selectedContactFiducialNode.AddFiducial(contactPos[0],contactPos[1],contactPos[2])
-      # Set color and visibility
-      displayNode = self.selectedContactFiducialNode.GetDisplayNode()
-      self.selectedContactFiducialNode.SetNthFiducialVisibility(0,True)
-      self.selectedContactFiducialNode.SetNthFiducialSelected(0,True)
-      displayNode.SetSelectedColor(1,.5,0) # orange
-
-    # Set visibility based on showSelectedContact flag
-    self.selectedContactFiducialNode.SetNthFiducialVisibility(0,self.showSelectedContact)
-    displayName = gridName+'_'+contactNumberStr
-    self.selectedContactFiducialNode.SetNthFiducialLabel(0,displayName)
-
-  def getLogic(self):
-    return SEEGRLogic()  
-
+    def getLogic(self):
+      return SEEGRLogic()  
+'''
 #
 # AirwayLandmarksLogic
 #
@@ -578,6 +750,69 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
   Uses ScriptedLoadableModuleLogic base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
+
+  def updateLandmarkTable(self, table, landmarkName, landmarkPosition):
+    """ Checks through given table for a row that starts with landmarkName.
+    If found, the supplied position is filled in, and function returns True.
+    If not found, the funciton returns False
+    """
+    foundLandmarkName=False
+    numberFormat = '%0.1f'
+    for rowIdx in range(table.rowCount):
+      rowLandmarkName = table.item(rowIdx,0).text()
+      #print('%s==%s'%(landmarkName,rowLandmarkName))
+      if rowLandmarkName==landmarkName:
+        # Match! Fill in position
+        R,A,S = landmarkPosition
+        Scol = table.columnCount-2 # 2nd from last
+        Acol = table.columnCount-3 # 3rd from last
+        Rcol = table.columnCount-4 # 4th from last
+        table.item(rowIdx,Scol).setText(numberFormat % S)
+        table.item(rowIdx,Acol).setText(numberFormat % A)
+        table.item(rowIdx,Rcol).setText(numberFormat % R)
+        foundLandmarkName = True
+    return foundLandmarkName
+
+  def selectNextUnfilledRow(self,table):
+    # Find the currently selected row
+    row = table.selectedIndexes()[0].row()
+    unfilledRowIdx = None
+    for rowIdx in range(row,table.rowCount):
+      if not self.rowIsFilled(table,rowIdx):
+        unfilledRowIdx = rowIdx
+        break
+    # If not found yet, start again at the top of the table
+    if unfilledRowIdx is None:
+      for rowIdx in range(row):
+        if not self.rowIsFilled(table,rowIdx):
+          unfilledRowIdx = rowIdx
+          break
+    # Now we've been through the whole table
+    if unfilledRowIdx is None:
+      # No empty rows!
+      # TODO: Should something else happen here?
+      table.clearSelection() # unselect all
+      # I want to change 
+      interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+      interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform) # activate regular mode (arrow pointer cursor)
+    else:
+      # Unfilled row identified
+      # Select this row
+      table.setCurrentItem(table.item(unfilledRowIdx,0))
+      # Trigger callback as if clicked
+      table.cellClicked(unfilledRowIdx,0)
+    return unfilledRowIdx # None if none found
+    
+  def rowIsFilled(self,table,rowIdx):
+    # A row is filled if the 3rd column has a coordinate in it (either R or A
+    # depending on whether sag coll is there)
+    text = table.item(rowIdx,2).text()
+    if is_number(text):
+      return True
+    else:
+      return False
+    
+
   def setAllSlicesOverlayOpacity(self,opacityVal):
     layoutManager = slicer.app.layoutManager()
     sliceNames = layoutManager.sliceViewNames()
@@ -1069,6 +1304,15 @@ class AirwayLandmarksTest(ScriptedLoadableModuleTest):
 #
 # Helper functions
 #
+
+def is_number(text):
+  try:
+    float(text)
+    return True
+  except ValueError:
+    return False
+
+
 def sortByForGridNames(gridName):
   # if the grid name is Trajectory^# or Trajectory^##, sort by the number, otherwise, sort alphabetically
   patt = re.compile(r'Trajectory\^(\d\d?)') 
