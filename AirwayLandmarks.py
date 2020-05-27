@@ -79,7 +79,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
     # Build the FH table 
     self.fhTable = self.buildLandmarkTable(fhLandmarkStringsList)
-    self.fitTableSize(self.fhTable)
+    AirwayLandmarksLogic().fitTableSize(self.fhTable)
     self.reorientFormLayout.addRow(self.fhTable)
     # add the reorient button
     self.reorientButton = qt.QPushButton('Reorient')
@@ -141,19 +141,6 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
           # Other columns (RAS & sag col)
           cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)#qt.Qt.NoItemFlags) 
     return table
-  
-
-  def fitTableSize(self,table):
-    # change the table size to have no scrollbars and be minimal size
-    # based on https://stackoverflow.com/questions/8766633/how-to-determine-the-correct-size-of-a-qtablewidget
-    growFlag = 1 #https://doc.qt.io/qt-5/qsizepolicy.html#PolicyFlag-enum
-    table.setSizePolicy(growFlag,growFlag)
-    table.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-    table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-    table.resizeColumnsToContents()
-    width = table.horizontalHeader().length()+table.verticalHeader().width
-    height = table.verticalHeader().length()+table.horizontalHeader().height
-    table.setFixedSize(width,height)
 
 
   def onFHCellClicked(self,row,col):
@@ -182,7 +169,9 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       for cpIdx in range(self.FHLandmarksNode.GetNumberOfControlPoints()):
         label = self.FHLandmarksNode.GetNthControlPointLabel(cpIdx)
         if label==landmarkName:
-          print('trying to remove control point %i'%(cpIdx))
+          self.FHLandmarksNode.RemoveNthControlPoint(cpIdx)
+          # Clear out table coordinates
+          AirwayLandmarksLogic().updateLandmarkTable(self.fhTable, landmarkName, landmarkPosition=None)
     # Activate point placement  
 
     print('Table Cell clicked: row=%i, col=%i, text=%s'%(row,col,self.fhTable.item(row,col).text()))
@@ -782,23 +771,30 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
   def updateLandmarkTable(self, table, landmarkName, landmarkPosition):
     """ Checks through given table for a row that starts with landmarkName.
     If found, the supplied position is filled in, and function returns True.
-    If not found, the funciton returns False
+    If not found, the function returns False
     """
     foundLandmarkName=False
     numberFormat = '%0.1f'
+    Scol = table.columnCount-2 # 2nd from last
+    Acol = table.columnCount-3 # 3rd from last
+    Rcol = table.columnCount-4 # 4th from last
     for rowIdx in range(table.rowCount):
       rowLandmarkName = table.item(rowIdx,0).text()
       #print('%s==%s'%(landmarkName,rowLandmarkName))
       if rowLandmarkName==landmarkName:
-        # Match! Fill in position
-        R,A,S = landmarkPosition
-        Scol = table.columnCount-2 # 2nd from last
-        Acol = table.columnCount-3 # 3rd from last
-        Rcol = table.columnCount-4 # 4th from last
-        table.item(rowIdx,Scol).setText(numberFormat % S)
-        table.item(rowIdx,Acol).setText(numberFormat % A)
-        table.item(rowIdx,Rcol).setText(numberFormat % R)
         foundLandmarkName = True
+        if landmarkPosition is None:
+          # Reset position text to empty strings
+          table.item(rowIdx,Scol).setText('')
+          table.item(rowIdx,Acol).setText('')
+          table.item(rowIdx,Rcol).setText('')
+        else:
+          # Match! Fill in position
+          R,A,S = landmarkPosition  
+          table.item(rowIdx,Scol).setText(numberFormat % S)
+          table.item(rowIdx,Acol).setText(numberFormat % A)
+          table.item(rowIdx,Rcol).setText(numberFormat % R)
+    self.fitTableSize(table)
     return foundLandmarkName
 
   def selectNextUnfilledRow(self,table):
@@ -839,7 +835,19 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
       return True
     else:
       return False
-    
+
+
+  def fitTableSize(self,table):
+    # change the table size to have no scrollbars and be minimal size
+    # based on https://stackoverflow.com/questions/8766633/how-to-determine-the-correct-size-of-a-qtablewidget
+    growFlag = 1 #https://doc.qt.io/qt-5/qsizepolicy.html#PolicyFlag-enum
+    table.setSizePolicy(growFlag,growFlag)
+    table.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    table.resizeColumnsToContents()
+    width = table.horizontalHeader().length()+table.verticalHeader().width
+    height = table.verticalHeader().length()+table.horizontalHeader().height
+    table.setFixedSize(width,height)  
 
   def setAllSlicesOverlayOpacity(self,opacityVal):
     layoutManager = slicer.app.layoutManager()
@@ -1420,7 +1428,7 @@ def make_FH_transform(F):
   for r in range(3):
     for c in range(3):
       vtkRotMatrix.SetElement(r,c,rm3x3[r,c])
-  transNode.SetAndObserveMatrixTransformToParent(vtkRotMatrix)
+  transNode.SetMatrixTransformToParent(vtkRotMatrix)
   slicer.mrmlScene.AddNode(transNode)
   return transNode
 
