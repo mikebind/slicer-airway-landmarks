@@ -79,6 +79,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
     # Build the FH table 
     self.fhTable = self.buildLandmarkTable(fhLandmarkStringsList)
+    self.fitTableSize(self.fhTable)
     self.reorientFormLayout.addRow(self.fhTable)
     # add the reorient button
     self.reorientButton = qt.QPushButton('Reorient')
@@ -91,7 +92,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     self.fhTable.connect('cellClicked(int,int)',self.onFHCellClicked)
     self.tempLandmarkNode.AddObserver(self.tempLandmarkNode.PointPositionDefinedEvent, self.onLandmarkClick)
     self.reorientButton.connect('clicked(bool)',self.onReorientButtonClick)
-    
+
     '''
     # Set the temporary node as the current Markups node
     selectionNode = slicer.app.applicationLogic().GetSelectionNode()
@@ -141,6 +142,20 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
           cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)#qt.Qt.NoItemFlags) 
     return table
   
+
+  def fitTableSize(self,table):
+    # change the table size to have no scrollbars and be minimal size
+    # based on https://stackoverflow.com/questions/8766633/how-to-determine-the-correct-size-of-a-qtablewidget
+    growFlag = 1 #https://doc.qt.io/qt-5/qsizepolicy.html#PolicyFlag-enum
+    table.setSizePolicy(growFlag,growFlag)
+    table.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    table.resizeColumnsToContents()
+    width = table.horizontalHeader().length()+table.verticalHeader().width
+    height = table.verticalHeader().length()+table.horizontalHeader().height
+    table.setFixedSize(width,height)
+
+
   def onFHCellClicked(self,row,col):
     # User clicked on one of the FH table cells.  First column has landmark name, last column is to reset, 
     # other columns should probably just reroute to first column.  
@@ -217,6 +232,19 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     #print('Landmark Name Later: '+landmarkName)
     #print(caller)
     #print(event)
+
+  def onReorientButtonClick(self):
+    # User clicked FH reorient button, do the reorientation
+    # Tricky part is handling what should happen with all existing lanmarks
+    # I think what should happen is a hardened transform of them into new FH image space
+    # This will keep them synchronized with the image even if FH reorientation is done repeatedly
+    # TODO: In terms of the FH transform, we want that to represent the transform from the ORIGINAL orientation
+    # (from DICOM or from initial load), so that needs to be made cumulative somehow, not just reflecting
+    # the most recent FH reorientation
+    print('Reorienting...')
+    FH_Transform = make_FH_transform(self.FHLandmarksNode)
+    # Apply transform to the volume
+    # Apply transform to all existing landmarks so that they move with the volume
     
 
 
@@ -1313,6 +1341,89 @@ def is_number(text):
     return False
 
 
+def make_FH_transform(F):
+  assert F.GetNumberOfControlPoints()==3, "There must be exactly 3 fiducial points to reorient to FH, left ear canal, right ear canal, and left orbit base"
+  FHpoints = []
+  for idx in range(3):
+    pos = [0,0,0]
+    F.GetNthControlPointPositionWorld(idx,pos)
+    FHpoints.append(pos)
+
+  # Identify the orbit as the most anterior point
+  ap_dimension_idx = 1 # RAS has A as the second dimension
+  anterior_coordinates = [point[ap_dimension_idx] for point in FHpoints]
+  orbit_idx = np.argmax(anterior_coordinates)
+  orbit_point = FHpoints.pop(orbit_idx) # remove orbit point from list, leaving only ear points
+  lr_dimension_idx = 0 # RAS has R as the first dimension
+  right_coordinates = [p[lr_dimension_idx] for p in FHpoints]
+  right_ear_idx = np.argmax(right_coordinates)
+  right_ear_point = FHpoints.pop(right_ear_idx)
+  left_ear_point = FHpoints.pop() # last remaining point must be left ear
+
+  vectorA = np.subtract(orbit_point, right_ear_point)
+  vectorB = np.subtract(orbit_point, left_ear_point)
+
+  origNormal = np.cross(vectorA, vectorB)
+  origNormal /= np.linalg.norm(origNormal)
+
+  # Find rotation matrix that brings the original normal to the goal normal (bringing
+  # all three points into a plane with normal [0,0,-1])
+  goalNormal = np.array([0,0,-1])
+  goalNormal = goalNormal/np.linalg.norm(goalNormal)
+
+  import math
+  from scipy.spatial.transform import Rotation
+
+  rotation_axis = np.cross(origNormal,goalNormal)
+  if np.linalg.norm(rotation_axis) > 1e-10:
+    rotation_axis = rotation_axis/np.linalg.norm(rotation_axis) # normalize
+    rotation_angle_radians = math.acos(np.dot(origNormal,goalNormal))
+    rotvec = rotation_axis*rotation_angle_radians
+    r1 = Rotation.from_rotvec(rotvec)
+  else:
+    # origNormal and goalNormal are very close to identical
+    r1 = Rotation.identity()
+
+  # Find intraplanar rotation 
+  # This is the rotation necessary to move the vector pointing from
+  # the right ear point to the left ear point to align with the direction
+  # of the vector [-1,0,0]
+  planarLtEar = r1.apply(left_ear_point)
+  planarRtEar = r1.apply(right_ear_point)    
+  planarLtoR = planarRtEar-planarLtEar
+  planarLtoR = planarLtoR/np.linalg.norm(planarLtoR) # normalize
+  LtoRGoal = [1,0,0]
+
+  r2_rotation_axis = np.cross(planarLtoR,LtoRGoal) 
+  # this cross product gives the perpedicular vector needed such that
+  # right hand rotation around it by the acos value goes from the current
+  # to the goal. This is why we don't need to worry about the sign of the 
+  # angle returned by acos
+  if np.linalg.norm(r2_rotation_axis)>1e-10:
+    r2_rotation_axis = r2_rotation_axis/np.linalg.norm(r2_rotation_axis) #normalize
+    r2_rotation_angle_radians = math.acos(np.dot(planarLtoR,LtoRGoal))
+    rotvec2 = r2_rotation_axis*r2_rotation_angle_radians
+    r2 = Rotation.from_rotvec(rotvec2)
+  else: 
+    r2 = Rotation.identity()
+
+  rtot = r2*r1 # apply r1 then r2, r3 is the combined rotation
+
+  # Make a transform from the calculated rotations
+  transformName = 'FH_Transform'
+  transNode = slicer.vtkMRMLLinearTransformNode()
+  transNode.SetName(transformName)
+
+  vtkRotMatrix = vtk.vtkMatrix4x4() # this will hold the rotation matrix
+  rm3x3 = rtot.as_matrix()
+  print('rm3x3='+str(rm3x3))
+  for r in range(3):
+    for c in range(3):
+      vtkRotMatrix.SetElement(r,c,rm3x3[r,c])
+  transNode.SetAndObserveMatrixTransformToParent(vtkRotMatrix)
+  slicer.mrmlScene.AddNode(transNode)
+  return transNode
+
 def sortByForGridNames(gridName):
   # if the grid name is Trajectory^# or Trajectory^##, sort by the number, otherwise, sort alphabetically
   patt = re.compile(r'Trajectory\^(\d\d?)') 
@@ -1323,6 +1434,7 @@ def sortByForGridNames(gridName):
   else:
     # pattern not found, sort alphabetically by name
     return gridName
+
 
 def parseDescriptionStr(descriptionStr):
   # parse the description string generated by BrainZoneDetector to get out the gray/white PTD value,
