@@ -42,6 +42,8 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
 
+    print('Running setup!')
+
     # Create or get the parameter node to store user choices
     self.parameterNode = AirwayLandmarksLogic().getParameterNode()
     pn = self.parameterNode
@@ -50,7 +52,30 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     FHLandmarksNodeName = 'FH_Landmarks'
     tempLandmarkNodeName = 'TempLandmark'
     landmarksNodeName = 'Airway_Landmarks'
-    landmarkStrings = ['Nasion','Basion','Anterior nasal spine'] # make whole big list her
+    # TODO: convert to pandas data frame and include tooltips for each of these
+    landmarkMidSagDict = {
+      'Vomer (posterior aspect)': False,
+      'Anterior Nasal Spine': False,
+      'C4 (anterior inferior aspect)': True,
+      'C2 (anterior inferior aspect)': True,
+      'Vallecula (inferior aspect)': True,
+      'Tongue (superior aspect)': True,
+      'Tongue (anterior aspect)': True,
+      'C3 (anterior aspect)': True,
+      'Hyoid (central point)': True,
+      'Pogonion': True,
+      'Nasion': True,
+      'Basion': True,
+      'Left gonion': False,
+      'Left condylion': False,
+      'Right gonion': False,
+      'Right condylion': False,
+      'Adenoids': False,
+      'Epigottis (superior tip)': False,
+      'Base of tongue': False,
+      'Glottis (anterior commissure)': False      
+    }
+    landmarkStrings = list(landmarkMidSagDict.keys())
     try:
       slicer.mrmlScene.RemoveNode(slicer.util.getNode(FHLandmarksNodeName))
     except slicer.util.MRMLNodeNotFoundException:
@@ -63,9 +88,22 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       print('No old tempLandmarks node to remove')
       pass
     self.tempLandmarkNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode',tempLandmarkNodeName)
-  
-   
+    try:
+      slicer.mrmlScene.RemoveNode(slicer.util.getNode(landmarksNodeName))
+    except slicer.util.MRMLNodeNotFoundException:
+      print('No old landmarks node to remove')
+    self.landmarksNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode',landmarksNodeName)
+
+    # Bind a keyboard shortcut of pressing 'h' to toggle display of already placed landmarks (non-FH)
+    #shortcutKeys  These are connected later, in the enter() function
+    self.shortcutH = qt.QShortcut(slicer.util.mainWindow())
+    self.shortcutH.setKey(qt.QKeySequence('h'))
+    self.shortcutM = qt.QShortcut(slicer.util.mainWindow())
+    self.shortcutM.setKey(qt.QKeySequence('m'))
+    #self.connectKeyboardShortcuts()
+
     # Instantiate and connect widgets ...
+
     
     # FH point selection
     # Idea is to have a table widget which will indicate and track the landmarks to connect
@@ -77,6 +115,19 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     self.layout.addWidget(reorientCollapsibleButton)
     self.reorientFormLayout = qt.QFormLayout(reorientCollapsibleButton)
 
+    # CT Volume selector
+    self.CTVolumeSelector = slicer.qMRMLNodeComboBox()
+    self.CTVolumeSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+    self.CTVolumeSelector.selectNodeUponCreation = True
+    self.CTVolumeSelector.addEnabled = False
+    self.CTVolumeSelector.removeEnabled = False
+    self.CTVolumeSelector.noneEnabled = False
+    self.CTVolumeSelector.showHidden = False
+    self.CTVolumeSelector.showChildNodeTypes = False
+    self.CTVolumeSelector.setMRMLScene( slicer.mrmlScene )
+    self.CTVolumeSelector.setToolTip('Choose the CT volume you will annotate')
+    self.reorientFormLayout.addRow('CT Volume',self.CTVolumeSelector)
+
     # Build the FH table 
     self.fhTable = self.buildLandmarkTable(fhLandmarkStringsList)
     AirwayLandmarksLogic().fitTableSize(self.fhTable)
@@ -85,13 +136,21 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     self.reorientButton = qt.QPushButton('Reorient')
     self.reorientFormLayout.addRow(self.reorientButton)
 
-    # Main Landmark table
+    landmarksCollapsibleButton = ctk.ctkCollapsibleButton()
+    landmarksCollapsibleButton.text = 'Landmarks'
+    self.layout.addWidget(landmarksCollapsibleButton)
+    self.landmarksFormLayout = qt.QFormLayout(landmarksCollapsibleButton)
 
+    # Main Landmark table
+    self.landmarksTable = self.buildLandmarkTable(landmarkStrings,mid_sag_bool_dict=landmarkMidSagDict, include_sag_col=True)
+    self.landmarksFormLayout.addRow(self.landmarksTable)
+    AirwayLandmarksLogic().fitTableSize(self.landmarksTable)
 
     # Connect callbacks
-    self.fhTable.connect('cellClicked(int,int)',self.onFHCellClicked)
+    self.fhTable.connect('cellClicked(int,int)',lambda row,col: self.onTableCellClicked(row,col,self.fhTable))
     self.tempLandmarkNode.AddObserver(self.tempLandmarkNode.PointPositionDefinedEvent, self.onLandmarkClick)
     self.reorientButton.connect('clicked(bool)',self.onReorientButtonClick)
+    self.landmarksTable.connect('cellClicked(int,int)',lambda row,col: self.onTableCellClicked(row,col,self.landmarksTable))
 
     '''
     # Set the temporary node as the current Markups node
@@ -106,12 +165,48 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     self.fhTable.setFocus() # not sure if this is needed
     '''
     # OR we could just
-    self.onFHCellClicked(0,0)
+    self.onTableCellClicked(0,0,self.fhTable)
     self.fhTable.setCurrentItem(self.fhTable.item(0,0))
     self.fhTable.setFocus() # not sure if this is needed
 
 
-  def buildLandmarkTable(self,landmarkStringsList, include_sag_col=False):
+  def enter(self):
+    '''Runs whenever the module is switched to, but apparently not on reload'''
+    #print('Entered!')
+    self.connectKeyboardShortcuts()
+
+  def exit(self):
+    '''Runs whenver the module is switched away from'''
+    #print('Exited!')
+    self.disconnectKeyboardShortcuts()
+  
+  def cleanup(self):
+    '''Runs whenever the module is closed or about to be reloaded'''
+    #print('Running cleanup')  
+    self.disconnectKeyboardShortcuts()
+
+  def connectKeyboardShortcuts(self):
+    '''Connect 'h' to show/hide landmarks and 'm' to toggle fiducial placement mode'''
+    #print('Connecting')
+    self.shortcutH.connect('activated()', self.onHKeyPressed)
+    self.shortcutM.connect('activated()', self.onMKeyPressed)
+
+  def disconnectKeyboardShortcuts(self):
+    #print('Disconnecting')
+    self.shortcutH.activated.disconnect()
+    self.shortcutM.activated.disconnect()
+
+  def onHKeyPressed(self):
+    #print('H key pressed!')
+    newState = AirwayLandmarksLogic().toggleLandmarkVisibility(self.landmarksNode)
+    # Set the FH landmarks to same visibility as main landmarks
+    self.FHLandmarksNode.GetDisplayNode().SetVisibility(newState)
+  
+  def onMKeyPressed(self):
+    #print('M key pressed')
+    AirwayLandmarksLogic().togglePlacementMode()
+
+  def buildLandmarkTable(self,landmarkStringsList, mid_sag_bool_dict={}, include_sag_col=False):
     table = qt.QTableWidget()
     rowCount = len(landmarkStringsList)
     table.setRowCount(rowCount)
@@ -123,27 +218,32 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     table.setColumnCount(colCount)
     table.setHorizontalHeaderLabels(colHeaders)
     for row in range(rowCount):
+      landmarkName = landmarkStringsList[row]
       for col in range(colCount):
         cell = qt.QTableWidgetItem()
         table.setItem(row,col,cell)
         if col==0:
-          cell.setText(landmarkStringsList[row])
+          cell.setText(landmarkName)
           cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled) # enabled and selectable, but not editable (41 would allow drop onto)
+        elif include_sag_col and col==1:
+          # sag col
+          forceMidSag = mid_sag_bool_dict[landmarkName]
+          if forceMidSag:
+            cell.setCheckState(qt.Qt.Checked)
+          else:
+            cell.setCheckState(qt.Qt.Unchecked)
+          cell.setFlags(qt.Qt.ItemIsEnabled) # could also do qt.Qt.ItemIsUserCheckable + qt.Qt.ItemIsEnable
         elif col==colCount-1:
           # Last column is reset column
           cell.setText('[X]')
           cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)
-        elif col==colCount-2:
-          cell.setText('?')
-          cell.setCheckState(qt.Qt.Checked)
-          cell.setFlags(qt.Qt.ItemIsUserCheckable + qt.Qt.ItemIsEnabled)# trying this out
         else:
-          # Other columns (RAS & sag col)
+          # Other columns (RAS)
           cell.setFlags(qt.Qt.ItemIsSelectable + qt.Qt.ItemIsEnabled)#qt.Qt.NoItemFlags) 
     return table
 
 
-  def onFHCellClicked(self,row,col):
+  '''def onFHCellClicked(self,row,col):
     # User clicked on one of the FH table cells.  First column has landmark name, last column is to reset, 
     # other columns should probably just reroute to first column.  
     # Clicking on a row should: 
@@ -175,6 +275,37 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # Activate point placement  
 
     print('Table Cell clicked: row=%i, col=%i, text=%s'%(row,col,self.fhTable.item(row,col).text()))
+  '''
+
+    
+  def onTableCellClicked(self,row,col,table):
+    landmarkName = table.item(row,0).text()
+    self.tempLandmarkNode.SetMarkupLabelFormat(landmarkName)
+    if table == self.fhTable:
+      self.currentRealLandmarksNode = self.FHLandmarksNode
+    else:
+      self.currentRealLandmarksNode = self.landmarksNode
+    # Activate point placement mode and make the temp landmark node the current one
+    selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+    selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode") # set type of node
+    selectionNode.SetActivePlaceNodeID(self.tempLandmarkNode.GetID()) # set temp node as the active one for placement
+    interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+    interactionNode.SetCurrentInteractionMode(interactionNode.Place) # activate placement mode
+    interactionNode.SwitchToPersistentPlaceMode() # make it persistent
+    # If reset clicked, do the reset
+    if col==(table.columnCount-1):
+      # Remove existing coordinates from real landmark node
+      for cpIdx in range(self.currentRealLandmarksNode.GetNumberOfControlPoints()):
+        label = self.currentRealLandmarksNode.GetNthControlPointLabel(cpIdx)
+        if label==landmarkName:
+          print('Resetting '+landmarkName)
+          self.currentRealLandmarksNode.RemoveNthControlPoint(cpIdx)
+          # Clear out table coordinates
+          AirwayLandmarksLogic().updateLandmarkTable(table, landmarkName, landmarkPosition=None)
+
+
+    
+
 
   def onLandmarkClick(self,caller,event):
     # event is NoEvent
@@ -189,7 +320,8 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # Get the temp control point position
     pos = [0]*3
     tempNode.GetNthControlPointPositionWorld(0,pos)
-    realNode = self.FHLandmarksNode
+    realNode = self.currentRealLandmarksNode
+    
     # Get the landmark name
     landmarkName = tempNode.GetNthControlPointLabel(0)
     print('Landmark name: '+landmarkName)
@@ -206,16 +338,21 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       # add as new control point
       cpIdx = realNode.AddControlPointWorld( vtk.vtkVector3d(*pos) )
       realNode.SetNthControlPointLabel(cpIdx, landmarkName)
+    # Either way, lock the point so you don't accidentally move it with the mouse
+    realNode.SetNthControlPointLocked(cpIdx, True)
     # Update the landmark table with the position
     success = AirwayLandmarksLogic().updateLandmarkTable(self.fhTable, landmarkName, pos)
     if not success:
       # Try the other landmark table
-      print('FH table updating failed')
+      success = AirwayLandmarksLogic().updateLandmarkTable(self.landmarksTable, landmarkName, pos)
+      if not success:
+        print('Table updating failed on both FH and full Landmark table')
       pass
     # Clear out temp control point
     tempNode.RemoveAllControlPoints()
     # Select the next unmarked row
-    AirwayLandmarksLogic().selectNextUnfilledRow(self.fhTable)
+    if AirwayLandmarksLogic().selectNextUnfilledRow(self.fhTable) is None:
+      AirwayLandmarksLogic().selectNextUnfilledRow(self.landmarksTable)
     
 
     #print('Landmark Name Later: '+landmarkName)
@@ -231,12 +368,53 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # (from DICOM or from initial load), so that needs to be made cumulative somehow, not just reflecting
     # the most recent FH reorientation
     print('Reorienting...')
-    FH_Transform = make_FH_transform(self.FHLandmarksNode)
-    # Apply transform to the volume
-    # Apply transform to all existing landmarks so that they move with the volume
-    
+    points_FH_Transform = make_FH_transform(self.FHLandmarksNode)
+    # Apply transform to the CT volume
+    volNode = self.CTVolumeSelector.currentNode()
+    if volNode is None:
+      raise Exception('No CT volume selected')
 
+    try:
+      volTransform = slicer.util.getNode('volume_FH_Transform')
+    except slicer.util.MRMLNodeNotFoundException:
+      volTransform = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLLinearTransformNode','volume_FH_Transform')
 
+    if volNode.GetTransformNodeID() is None:
+      # No existing transform, just use the new one
+      matrix = vtk.vtkMatrix4x4()
+      points_FH_Transform.GetMatrixTransformToParent(matrix)
+      volTransform.SetMatrixTransformToParent(matrix)
+    else:
+      #need to compose old and new transforms
+      oldVolTransform = slicer.util.getNode(volNode.GetTransformNodeID())
+      oldTransformMatrix = vtk.vtkMatrix4x4()
+      oldVolTransform.GetMatrixTransformToParent(oldTransformMatrix)
+      newTransformMatrix = vtk.vtkMatrix4x4()
+      points_FH_Transform.GetMatrixTransformToParent(newTransformMatrix)
+      combinedTransformMatrix = vtk.vtkMatrix4x4()
+      vtk.vtkMatrix4x4().Multiply4x4(oldTransformMatrix, newTransformMatrix, combinedTransformMatrix)
+      volTransform.SetMatrixTransformToParent(combinedTransformMatrix)
+    volNode.SetAndObserveTransformNodeID(volTransform.GetID())
+
+    # Apply points transform to all existing landmarks so that they move with the volume
+    self.FHLandmarksNode.SetAndObserveTransformNodeID(points_FH_Transform.GetID())
+    self.landmarksNode.SetAndObserveTransformNodeID(points_FH_Transform.GetID())
+    # Harden to make change permanent
+    slicer.vtkSlicerTransformLogic().hardenTransform(self.FHLandmarksNode)
+    slicer.vtkSlicerTransformLogic().hardenTransform(self.landmarksNode)
+    # Update the tables 
+    for cpIdx in range(self.FHLandmarksNode.GetNumberOfControlPoints()):
+      landmarkName = self.FHLandmarksNode.GetNthControlPointLabel(cpIdx)
+      newPos = [0]*3
+      self.FHLandmarksNode.GetNthControlPointPositionWorld(cpIdx,newPos)
+      AirwayLandmarksLogic().updateLandmarkTable(self.fhTable, landmarkName, newPos)
+    for cpIdx in range(self.landmarksNode.GetNumberOfControlPoints()):
+      landmarkName = self.landmarksNode.GetNthControlPointLabel(cpIdx)
+      newPos = [0]*3
+      self.landmarksNode.GetNthControlPointPositionWorld(cpIdx,newPos)
+      AirwayLandmarksLogic().updateLandmarkTable(self.landmarksTable, landmarkName, newPos)
+
+ 
   '''
   OK, what do I need to set up?  
   * Temporary Fidicual Node
@@ -799,7 +977,10 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
 
   def selectNextUnfilledRow(self,table):
     # Find the currently selected row
-    row = table.selectedIndexes()[0].row()
+    if len(table.selectedIndexes())==0:
+      row=0 # default to 0 if no selected cell
+    else:
+      row = table.selectedIndexes()[0].row() # start from currently selected cell
     unfilledRowIdx = None
     for rowIdx in range(row,table.rowCount):
       if not self.rowIsFilled(table,rowIdx):
@@ -826,6 +1007,7 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
       # Trigger callback as if clicked
       table.cellClicked(unfilledRowIdx,0)
     return unfilledRowIdx # None if none found
+
     
   def rowIsFilled(self,table,rowIdx):
     # A row is filled if the 3rd column has a coordinate in it (either R or A
@@ -848,6 +1030,25 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
     width = table.horizontalHeader().length()+table.verticalHeader().width
     height = table.verticalHeader().length()+table.horizontalHeader().height
     table.setFixedSize(width,height)  
+
+  def toggleLandmarkVisibility(self,markupsNode):
+    # TODO: consider changing this so it hides the labels, but not the points...
+    oldState = markupsNode.GetDisplayNode().GetVisibility()
+    newState = not oldState
+    markupsNode.GetDisplayNode().SetVisibility(newState)
+    return newState
+
+  def togglePlacementMode(self):
+    # If interaction mode is not "Place", switch to place mode; if it is "Place",
+    # then switch to regular mode (which is called ViewTransform)
+    interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+    if interactionNode.GetCurrentInteractionMode()== interactionNode.Place:
+      # switch to regular arrow curson mode
+      interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+    else:
+      # switch to placement mode
+      interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
 
   def setAllSlicesOverlayOpacity(self,opacityVal):
     layoutManager = slicer.app.layoutManager()
@@ -1418,7 +1619,7 @@ def make_FH_transform(F):
   rtot = r2*r1 # apply r1 then r2, r3 is the combined rotation
 
   # Make a transform from the calculated rotations
-  transformName = 'FH_Transform'
+  transformName = 'points_FH_Transform'
   transNode = slicer.vtkMRMLLinearTransformNode()
   transNode.SetName(transformName)
 
