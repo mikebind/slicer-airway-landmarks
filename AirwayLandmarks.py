@@ -5,7 +5,8 @@ import re
 import numpy as np
 from slicer.ScriptedLoadableModule import *
 import logging
-import json
+import math
+from scipy.spatial.transform import Rotation
 
 #
 # Airway Landmarks
@@ -44,9 +45,11 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
     print('Running setup!')
 
+    self.logic = AirwayLandmarksLogic()
     # Create or get the parameter node to store user choices
-    self.parameterNode = AirwayLandmarksLogic().getParameterNode()
+    self.parameterNode = self.logic.getParameterNode()
     pn = self.parameterNode
+    
 
     fhLandmarkStringsList = ['Left ear FH', 'Right ear FH', 'Left orbit FH']
     FHLandmarksNodeName = 'FH_Landmarks'
@@ -97,7 +100,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       'Right gonion': False,
       'Right condylion': False,
       'Adenoids': False,
-      'Epigottis (superior tip)': False,
+      'Epiglottis (superior tip)': False,
       'Base of tongue': False,
       'Glottis (anterior commissure)': False      
     }
@@ -108,13 +111,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # TODO add ability to sync from node
     # TODO add ability to switch nodes or create new... (node selector with New option)
 
-    # Bind a keyboard shortcut of pressing 'h' to toggle display of already placed landmarks (non-FH)
-    #shortcutKeys  These are connected later, in the enter() function
-    self.shortcutH = qt.QShortcut(slicer.util.mainWindow())
-    self.shortcutH.setKey(qt.QKeySequence('h'))
-    self.shortcutM = qt.QShortcut(slicer.util.mainWindow())
-    self.shortcutM.setKey(qt.QKeySequence('m'))
-    #self.connectKeyboardShortcuts()
+    
 
     # Instantiate and connect widgets ...
 
@@ -154,7 +151,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
     # Build the FH table 
     self.fhTable = self.buildLandmarkTable(fhLandmarkStringsList)
-    AirwayLandmarksLogic().fitTableSize(self.fhTable)
+    self.logic.fitTableSize(self.fhTable)
     self.reorientFormLayout.addRow(self.fhTable)
     # add the reorient button
     self.reorientButton = qt.QPushButton('Reorient')
@@ -165,7 +162,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       self.FHLandmarksNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', FHLandmarksNodeName)
     else:
       # Already existing, fill table from it
-      AirwayLandmarksLogic().updateLandmarkTableFromNode(self.fhTable, self.FHLandmarksNode)
+      self.logic.updateLandmarkTableFromNode(self.fhTable, self.FHLandmarksNode)
     self.FHLandmarksNodeSelector.setCurrentNode(self.FHLandmarksNode) # Initialize selector
 
     # 
@@ -186,11 +183,11 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # Main Landmark table
     self.landmarksTable = self.buildLandmarkTable(landmarkStrings,mid_sag_bool_dict=landmarkMidSagDict, include_sag_col=True)
     self.landmarksFormLayout.addRow(self.landmarksTable)
-    AirwayLandmarksLogic().fitTableSize(self.landmarksTable)
+    self.logic.fitTableSize(self.landmarksTable)
     if self.landmarksNode is None:
       self.landmarksNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', landmarksNodeName)
     else:
-      AirwayLandmarksLogic().updateLandmarkTableFromNode(self.landmarksTable, self.landmarksNode)
+      self.logic.updateLandmarkTableFromNode(self.landmarksTable, self.landmarksNode)
     self.landmarksNodeSelector.setCurrentNode(self.landmarksNode)
 
     # Calculate
@@ -246,21 +243,40 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
 
     self.onCTVolumeSelectorChange() # to initialize parameter node
 
+    # Bind a keyboard shortcut of pressing 'h' to toggle display of already placed landmarks (non-FH)
+    #shortcutKeys  These are connected later, in the enter() function
+    self.shortcutH = qt.QShortcut(slicer.util.mainWindow())
+    self.shortcutH.setKey(qt.QKeySequence('h'))
+    self.shortcutM = qt.QShortcut(slicer.util.mainWindow())
+    self.shortcutM.setKey(qt.QKeySequence('m'))
+    self.shortcutH.connect('activated()', self.onHKeyPressed)
+    self.shortcutH.connect('activatedAmbiguously()', self.onAmbiguousHKeyPress)
+    self.shortcutM.connect('activated()', self.onMKeyPressed)
+    self.enableKeyboardShortcuts()
+
+    self.onFHLandmarksNodeSelectorChange()
+    self.onLandmarksNodeSelectorChange()
+
 
   def enter(self):
     '''Runs whenever the module is switched to, but apparently not on reload'''
     #print('Entered!')
-    self.connectKeyboardShortcuts()
+    try:
+      self.enableKeyboardShortcuts() # this throws errors if shortcut is destroyed from previous run
+    except:
+      pass 
 
   def exit(self):
     '''Runs whenver the module is switched away from'''
     #print('Exited!')
-    self.disconnectKeyboardShortcuts()
+    #self.disableKeyboardShortcuts()
   
   def cleanup(self):
     '''Runs whenever the module is closed or about to be reloaded'''
     #print('Running cleanup')  
-    self.disconnectKeyboardShortcuts()
+    self.disableKeyboardShortcuts()
+    self.shortcutH.delete()
+    self.shortcutM.delete()
 
   def onCTVolumeSelectorChange(self):
     # update parameter node 'vol_id'
@@ -278,8 +294,9 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       self.parameterNode.SetParameter('FHLandmarksNode_ID', '')
     else:
       self.parameterNode.SetParameter('FHLandmarksNode_ID', new_fh_node.GetID())
+      self.logic.setMarkupScales(new_fh_node, glyphScale=2, textScale=2)
     self.FHLandmarksNode = new_fh_node
-    AirwayLandmarksLogic().updateLandmarkTableFromNode(self.fhTable, self.FHLandmarksNode)
+    self.logic.updateLandmarkTableFromNode(self.fhTable, self.FHLandmarksNode)
 
   def onLandmarksNodeSelectorChange(self):
     # update parameter node and update table
@@ -288,33 +305,49 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       self.parameterNode.SetParameter('AirwayLandmarksNode_ID', '')
     else:
       self.parameterNode.SetParameter('AirwayLandmarksNode_ID', new_landmarks_node.GetID())
+      self.logic.setMarkupScales(new_landmarks_node, glyphScale=2, textScale=2)
+    self.logic.regularizeLandmarksNode(new_landmarks_node)
     self.landmarksNode = new_landmarks_node
-    AirwayLandmarksLogic().updateLandmarkTableFromNode(self.landmarksTable, self.landmarksNode)
+    self.logic.updateLandmarkTableFromNode(self.landmarksTable, self.landmarksNode)
 
-  def connectKeyboardShortcuts(self):
+  def enableKeyboardShortcuts(self):
     '''Connect 'h' to show/hide landmarks and 'm' to toggle fiducial placement mode'''
-    #print('Connecting')
-    self.shortcutH.connect('activated()', self.onHKeyPressed)
-    self.shortcutM.connect('activated()', self.onMKeyPressed)
+    #print('Enabling...')
+    if not self.shortcutH.isEnabled():
+      self.shortcutH.setEnabled(1)#.connect('activated()', self.onHKeyPressed)
+      #print('enabled')
+    if not self.shortcutM.isEnabled():
+      self.shortcutM.setEnabled(1)#.connect('activated()', self.onMKeyPressed)
 
-  def disconnectKeyboardShortcuts(self):
-    #print('Disconnecting')
-    self.shortcutH.activated.disconnect()
-    self.shortcutM.activated.disconnect()
+  def disableKeyboardShortcuts(self):
+    #print('Disabling...')
+    if self.shortcutH.isEnabled():
+      self.shortcutH.setEnabled(0)
+      #print('disabled')
+    if self.shortcutM.isEnabled():
+      self.shortcutM.setEnabled(0) #.activated.disconnect()
 
   def onHKeyPressed(self):
     #print('H key pressed!')
-    newState = AirwayLandmarksLogic().toggleLandmarkVisibility(self.landmarksNode)
+    newState = self.logic.toggleLandmarkVisibility(self.landmarksNode)
     # Set the FH landmarks to same visibility as main landmarks
-    self.FHLandmarksNode.GetDisplayNode().SetVisibility(newState)
+    if self.FHLandmarksNode is not None:
+      self.FHLandmarksNode.GetDisplayNode().SetPointLabelsVisibility(newState)
+
+  def onAmbiguousHKeyPress(self):
+    print("AMBIGUOUS H")
+    
   
   def onMKeyPressed(self):
     #print('M key pressed')
-    AirwayLandmarksLogic().togglePlacementMode()
+    self.logic.togglePlacementMode()
+
+  def onQKeyPressed(self):
+    print('Q pressed!')
 
   def onCalculateButtonClick(self):
     # Triggers calculation of landmark measures given current landmark positions
-    report_str = AirwayLandmarksLogic().calculate_measures(self.landmarksNode)
+    report_str = self.logic.calculate_measures(self.landmarksNode)
     self.measuresText.setText(report_str)
     self.parameterNode.SetParameter('report_str', report_str)
 
@@ -328,7 +361,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
         vol_name = slicer.util.getNode(vol_id).GetName()
       except slicer.util.MRMLNodeNotFoundException:
         vol_name = 'NoneSelected'
-      AirwayLandmarksLogic().create_csv(csvPathAndName, report_str, vol_name)
+      self.logic.create_csv(csvPathAndName, report_str, vol_name)
 
   def onAddToCSVButtonClick(self):
     # Button clicked to add line to existing csv file
@@ -340,7 +373,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
         vol_name = slicer.util.getNode(vol_id).GetName()
       except slicer.util.MRMLNodeNotFoundException:
         vol_name = 'NoneSelected'
-      AirwayLandmarksLogic().add_to_csv(csvPathAndName, report_str, vol_name)
+      self.logic.add_to_csv(csvPathAndName, report_str, vol_name)
 
   def buildLandmarkTable(self,landmarkStringsList, mid_sag_bool_dict={}, include_sag_col=False):
     table = qt.QTableWidget()
@@ -403,7 +436,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
           print('Resetting '+landmarkName)
           self.currentRealLandmarksNode.RemoveNthControlPoint(cpIdx)
           # Clear out table coordinates
-          AirwayLandmarksLogic().updateLandmarkTableEntry(table, landmarkName, landmarkPosition=None)
+          self.logic.updateLandmarkTableEntry(table, landmarkName, landmarkPosition=None)
 
 
     
@@ -443,18 +476,23 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     # Either way, lock the point so you don't accidentally move it with the mouse
     realNode.SetNthControlPointLocked(cpIdx, True)
     # Update the landmark table with the position
-    success = AirwayLandmarksLogic().updateLandmarkTableEntry(self.fhTable, landmarkName, pos)
-    if not success:
+    successFH = self.logic.updateLandmarkTableEntry(self.fhTable, landmarkName, pos)
+    if not successFH:
       # Try the other landmark table
-      success = AirwayLandmarksLogic().updateLandmarkTableEntry(self.landmarksTable, landmarkName, pos)
-      if not success:
+      successL = self.logic.updateLandmarkTableEntry(self.landmarksTable, landmarkName, pos)
+      if not successL:
         print('Table updating failed on both FH and full Landmark table')
-      pass
+      
     # Clear out temp control point
     tempNode.RemoveAllControlPoints()
     # Select the next unmarked row
-    if AirwayLandmarksLogic().selectNextUnfilledRow(self.fhTable) is None:
-      AirwayLandmarksLogic().selectNextUnfilledRow(self.landmarksTable)
+    if successFH:
+      # Try FH table first, then LandmarksTable
+      if self.logic.selectNextUnfilledRow(self.fhTable) is None:
+        self.logic.selectNextUnfilledRow(self.landmarksTable)
+    else:
+      # Go straight to LandmarksTable
+      self.logic.selectNextUnfilledRow(self.landmarksTable)
     
 
     #print('Landmark Name Later: '+landmarkName)
@@ -509,12 +547,12 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
       landmarkName = self.FHLandmarksNode.GetNthControlPointLabel(cpIdx)
       newPos = [0]*3
       self.FHLandmarksNode.GetNthControlPointPositionWorld(cpIdx,newPos)
-      AirwayLandmarksLogic().updateLandmarkTableEntry(self.fhTable, landmarkName, newPos)
+      self.logic.updateLandmarkTableEntry(self.fhTable, landmarkName, newPos)
     for cpIdx in range(self.landmarksNode.GetNumberOfControlPoints()):
       landmarkName = self.landmarksNode.GetNthControlPointLabel(cpIdx)
       newPos = [0]*3
       self.landmarksNode.GetNthControlPointPositionWorld(cpIdx,newPos)
-      AirwayLandmarksLogic().updateLandmarkTableEntry(self.landmarksTable, landmarkName, newPos)
+      self.logic.updateLandmarkTableEntry(self.landmarksTable, landmarkName, newPos)
 
  
   '''
@@ -544,6 +582,21 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
   Uses ScriptedLoadableModuleLogic base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
+
+  def setMarkupScales(self, markups_node, glyphScale=2, textScale=2):
+    markups_node.GetDisplayNode().SetGlyphScale(glyphScale)
+    markups_node.GetDisplayNode().SetTextScale(textScale)
+
+  def regularizeLandmarksNode(self, landmarksNode):
+    # Fix typos/capitalization from previous versions of module
+    if landmarksNode is None:
+      return
+    for cpIdx in range(landmarksNode.GetNumberOfControlPoints()):
+      label = landmarksNode.GetNthControlPointLabel(cpIdx)
+      if label=='Anterior nasal spine':
+        landmarksNode.SetNthControlPointLabel(cpIdx, 'Anterior Nasal Spine')
+      elif label=='Epigottis (superior tip)':
+        landmarksNode.SetNthControlPointLabel(cpIdx, 'Epiglottis (superior tip)')
 
   def calculate_measures(self, landmarks_node):
     '''Calculate all possible airway measures.  If a needed landmark point is missing, just
@@ -764,7 +817,7 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
         idx = node_landmark_labels.index(rowLandmarkName)
         pos = [0]*3
         landmarks_node.GetNthControlPointPositionWorld(idx, pos)
-        self.updateLandmarkTableEntry(table, rowLandmarkName, pos)
+        #self.updateLandmarkTableEntry(table, rowLandmarkName, pos)
       except AttributeError:
         # landmarks_node must be None, clear table row
         pos = None
@@ -835,10 +888,14 @@ class AirwayLandmarksLogic(ScriptedLoadableModuleLogic):
 
   def toggleLandmarkVisibility(self,markupsNode):
     # TODO: consider changing this so it hides the labels, but not the points...
-    oldState = markupsNode.GetDisplayNode().GetVisibility()
-    newState = not oldState
-    markupsNode.GetDisplayNode().SetVisibility(newState)
-    return newState
+    if markupsNode is not None:
+      oldState = markupsNode.GetDisplayNode().GetPointLabelsVisibility()
+      newState = not oldState
+      markupsNode.GetDisplayNode().SetPointLabelsVisibility(newState)
+      return newState
+    else:
+      return None
+      
 
   def togglePlacementMode(self):
     # If interaction mode is not "Place", switch to place mode; if it is "Place",
@@ -1037,137 +1094,3 @@ def sortByForGridNames(gridName):
     return gridName
 
 
-def parseDescriptionStr(descriptionStr):
-  # parse the description string generated by BrainZoneDetector to get out the gray/white PTD value,
-  # the primary anatomical label, and the full anatomical label
-
-  # example description strings 
-  # ' WM-hypointensities,86.0,Wm,14.0,PTD, 0.71'
-  # ' Wm,100.0,PTD, -1.00'
-  # ' Unk,100.0,PTD, 1.00'
-  # ' Unk,86.0,ctx-lh-rostralmiddlefrontal,14.0,PTD, 1.00'
-  # ' ctx-lh-insula,86.0,Wm,14.0,PTD, 0.71'
-
-  # If query string is empty, return None for all outputs
-  if len(descriptionStr)==0: 
-    return None,None,None,None,None,None
-
-  # The pattern has changed to:
-  # GWULabel (Gray: X%, White: Y%, Unk: Z%); anatLabel1 (A1%), anatLabel2 (A2%),
-
-  # The pattern is label,%, possibly repeated, followed by PTD, -?[1,0].\d\d
-  anatPatt = re.compile(r'''(?P<withPct>
-                        (?P<anat>
-                          [a-zA-Z-]+ #letters and dashes
-                        )
-                        [ ]* # optional whitespace
-                        [(]  # open paren
-                        (?P<pct>  # group percentage digits
-                          [0-9.]+  # digits or decimal point
-                        )  
-                        [%]   # percent sign
-                        [)]   # close paren
-                      )''', re.VERBOSE)
-
-  g = re.findall(anatPatt,descriptionStr)
-  if g is None:
-    # this shouldn't really happen, maybe throw error here?
-    pass
-  numAnatLabels = len(g)
-  anatLabels = []
-  anatPcts = []
-  for ind in range(numAnatLabels):
-    anatLabels.append(g[ind][1])
-    anatPcts.append(g[ind][2]) 
-  AnatLabel1st = anatLabels[0]
-
-  # Build multiline AnatLabelAll (label: pct% \n)
-  AnatLabelAll = '\n'.join([label+':'+pct+'%' for label,pct in zip(anatLabels,anatPcts)])
-
-  # Find GWU label ('Gray','White','Mixed','Unknown') and pct for each
-  GWU_Patt = re.compile(r'''
-    (?P<gwuLabel>
-      [a-zA-Z]+  # upper and lowercase letters (no special characters, no white space)
-    )
-    [ ]*[(]Gray: # optional whitespace followed by open paren, followed by the exact string 'Gray:'
-    [ ]*  # followed by optional whitespace
-    (?P<grayPct>
-      [0-9.]+ # followed by a decimal number, saved as grayPct
-    )
-    [%],[ ]* # followed by percent symbol, comma, and optional whitespace
-    White:[ ]*
-    (?P<whitePct>
-      [0-9.]+ # followed by a decimal number, saved as whitePct
-    )
-    [%],[ ]*
-    Unk:[ ]*
-    (?P<unkPct>
-      [0-9.]+ # followed by a decimal number, saved as unkPct
-    )
-    [%][)] # followed by percent symbol and close paren
-    ''',re.VERBOSE)
-  
-  gwu_match = re.search(GWU_Patt,descriptionStr)
-  GWULabel = gwu_match.group('gwuLabel')
-  grayFrac = float(gwu_match.group('grayPct'))/100
-  whiteFrac = float(gwu_match.group('whitePct'))/100
-  unkFrac = float(gwu_match.group('unkPct'))/100
-
-
-
-  return GWULabel,grayFrac,whiteFrac,unkFrac,AnatLabel1st,AnatLabelAll
-
-def makeQBrush(namedColorStr,styleNum):
-    # Convenience function for creating QBrush objects for coloring the background of table cells
-    # namedColorStr can be any of the SVG named colors, styleNum is an integer 0-16 or 24. 
-    # 0 is no brush pattern
-    # 1 is solid
-    # 2-8 are increasingly sparse brush patterns
-    # 9 is horizontal lines, 10 is vertical lines, 11 is crossing horiz and vert lines
-    # 12-14 are same for diagonal lines
-    # 15-17 are gradient patterns (look up before using)
-    # 24 is texture pattern (supply image to tile, look up before using)
-    # https://doc.qt.io/qt-5/qt.html#BrushStyle-enum
-    # Can also refer to by name like: qt.Qt.SolidPattern (for 1)
-    #
-    brush = qt.QBrush()
-    color = qt.QColor()
-    color.setNamedColor(namedColorStr)
-    brush.setColor(color)
-    brush.setStyle(styleNum)
-    return brush
-    
-
-
-def brushFromGWULabel(gwuLabel):
-    brush = qt.QBrush()
-    label = gwuLabel.lower()
-    if label == 'gray':
-        brush = makeQBrush('gray',1) # 1 is solid
-    if label == 'mixed':
-        brush = makeQBrush('gray',6) # 6 is somewhat sparse
-    if label == 'white':
-        brush = makeQBrush('white',1) # 1 is solid
-    if label == 'unk' or label == 'unknown':
-        brush = makeQBrush('darkorchid',1)
-    return brush
-
-
-def brushFromPTDValue(PTDgrayVal,unkFrac=None):
-    # PTDgrayVal is -1 for white, +1 for gray, and 0 for borderline
-    # Returns qt.QBrush based on that value. 
-    brush = qt.QBrush()
-    #color = qt.QColor()
-    if unkFrac and unkFrac>0.5:
-        # Categorize as unknown, color purple
-        brush = makeQBrush('darkorchid',1)
-    elif PTDgrayVal< -0.3:
-        # Categorize white
-        brush = makeQBrush('white',1) # 1 is solid
-    elif PTDgrayVal >=-.3 and PTDgrayVal<=0.3:
-        # borderline
-        brush = makeQBrush('gray',6) # 6 is somewhat sparse
-    else: # PTDgrayVal > 0.3
-        # Categorize gray matter
-        brush = makeQBrush('gray',1) # 1 is solid
-    return brush
