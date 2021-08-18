@@ -85,6 +85,7 @@ class AirwayLandmarksWidget(ScriptedLoadableModuleWidget):
     landmarkMidSagDict = {
       'Vomer (posterior aspect)': False,
       'Anterior Nasal Spine': False,
+      'C5 (anterior inferior aspect)': True,
       'C4 (anterior inferior aspect)': True,
       'C2 (anterior inferior aspect)': True,
       'Vallecula (inferior aspect)': True,
